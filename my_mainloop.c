@@ -291,9 +291,15 @@ static enBool checkLoopBuffFull()
 	return ((loopBuff.writeIdx+1)%LOOP_BUFF_MAX_IDX == loopBuff.readIdx) ? TRUE : FALSE;
 }
 
-static void calLoopBuffNextIdx(int *index)
+static void calLoopBuffNextIdx(int *pIndex)
 {
-	*index = (*index + 1) % LOOP_BUFF_MAX_IDX;
+	//*index = (*index + 1) % LOOP_BUFF_MAX_IDX;
+	int newIndex = __sync_add_and_fetch(pIndex, 1);
+    if (newIndex >= LOOP_BUFF_MAX_IDX){
+		/*bool __sync_bool_compare_and_swap (type *ptr, type oldval type newval, ...)
+		   if *ptr == oldval, use newval to update *ptr value */
+        __sync_bool_compare_and_swap(pIndex, newIndex, newIndex % LOOP_BUFF_MAX_IDX);
+    }
 	return;
 }
 
