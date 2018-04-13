@@ -867,6 +867,20 @@ static void* loopGetMsg2(void* userData)
 	return (void*)0;
 }
 
+static int handleMsgSelf(stMyMsg *pMsg)
+{
+	if(pMsg->eventType == 0){
+		printf("msgData: %s\n", pMsg->eventData);
+		/* 测试自己给自己发消息 */
+		stMyMsg msg = {0};
+		msg.eventType = 0;
+		sprintf(msg.eventData, "%s", "[MAILBOX1]hello, test 1 message send by myself!!!\n");
+		my_sendto_mailbox(MAIL_BOX_ID1, &msg);
+		printf("send message to MAIL_BOX_ID1 by myself.\n");
+	}
+	return 0;	
+}
+
 int main()
 {
 	#if 0
@@ -905,5 +919,15 @@ int main()
 	pthread_create(&threadID, NULL, loopGetMsg2, NULL);
 
 	my_getfrom_mailbox_loop(MAIL_BOX_ID3, handleMsgTest, 500);
+
+	#if 0
+	/* 测试自己给自己发消息 */
+	my_create_mailbox(MAIL_BOX_ID1);
+	stMyMsg msg = {0};
+	msg.eventType = 0;
+	sprintf(msg.eventData, "%s", "[MAILBOX1]hello, test 1 message send!!!\n");
+	my_sendto_mailbox(MAIL_BOX_ID1, &msg);
+	my_getfrom_mailbox_loop(MAIL_BOX_ID1, handleMsgSelf, 500);
+	#endif
 	return 0;
 }
