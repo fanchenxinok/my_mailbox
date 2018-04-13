@@ -61,8 +61,8 @@ typedef struct{
 #define LOOP_BUFF_MAX_IDX (64)
 #define LOOP_BUFF_ITEAM_MAX_LEN (256)
 typedef struct{
-	int readIdx;
-	int writeIdx;
+	volatile int readIdx;
+	volatile int writeIdx;
 	char buffer[LOOP_BUFF_MAX_IDX][LOOP_BUFF_ITEAM_MAX_LEN];
 }stLoopBuff;
 
