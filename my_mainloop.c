@@ -61,8 +61,8 @@ typedef struct{
 #define LOOP_BUFF_MAX_IDX (64)
 #define LOOP_BUFF_ITEAM_MAX_LEN (256)
 typedef struct{
-	int readIdx;
-	int writeIdx;
+	volatile int readIdx;
+	volatile int writeIdx;
 	char buffer[LOOP_BUFF_MAX_IDX][LOOP_BUFF_ITEAM_MAX_LEN];
 }stLoopBuff;
 
@@ -301,9 +301,15 @@ static enBool checkLoopBuffFull()
 	return ((loopBuff.writeIdx+1)%LOOP_BUFF_MAX_IDX == loopBuff.readIdx) ? TRUE : FALSE;
 }
 
-static void calLoopBuffNextIdx(int *index)
+static void calLoopBuffNextIdx(int *pIndex)
 {
-	*index = (*index + 1) % LOOP_BUFF_MAX_IDX;
+	//*index = (*index + 1) % LOOP_BUFF_MAX_IDX;
+	int newIndex = __sync_add_and_fetch(pIndex, 1);
+	if (newIndex >= LOOP_BUFF_MAX_IDX){
+		/*bool __sync_bool_compare_and_swap (type *ptr, type oldval type newval, ...)
+			if *ptr == oldval, use newval to update *ptr value */
+		__sync_bool_compare_and_swap(pIndex, newIndex, newIndex % LOOP_BUFF_MAX_IDX);
+	}
 	return;
 }
 
@@ -731,8 +737,7 @@ void my_getfrom_mailbox(enMailBoxId mailBoxId, handleMsg pHandleMsgFunc, int tim
 			return;
 		}
 	}
-	return;
-
+	return;
 }
 
 /* timeOut: -1: wait forever else positive value (ms) */
@@ -750,8 +755,7 @@ void my_getfrom_mailbox_loop(enMailBoxId mailBoxId, handleMsg pHandleMsgFunc, in
 	s_my_mailbox[mailBoxId].pMainLoop->time_out = timeOut;
 	SAFETY_MUTEX_UNLOCK(s_mailbox_mutex);
 	my_mainloop_run(s_my_mailbox[mailBoxId].pMainLoop);
-	return;
-
+	return;
 }
 
 static void* sendMsgTest1(void* userData)
@@ -843,6 +847,31 @@ static void* sendMsgTest4(void* userData)
 	return (void*)0;
 }
 
+static void* sendMsgTest5(void* userData)
+{
+	stMyMsg msg = {0};
+	while(1){
+		msg.eventType = 0;
+		sprintf(msg.eventData, "%s", "[MAILBOX2]hello, test 1 message send!!!\n");
+		my_sendto_mailbox(MAIL_BOX_ID2, &msg);
+		
+		msg.eventType = 0;
+		sprintf(msg.eventData, "%s", "[MAILBOX2]hello, test 2 message send!!!\n");
+		my_sendto_mailbox(MAIL_BOX_ID2, &msg);
+		usleep(10000);
+
+		msg.eventType = 1;
+		int a = 1000, b = 2000;
+		my_msg_packer(msg.eventData,
+					 	sizeof(int), &a,
+					 	sizeof(int), &b, -1);
+		my_sendto_mailbox(MAIL_BOX_ID2, &msg);
+		usleep(10000);
+	}
+	return (void*)0;
+}
+
+
 static int handleMsgTest(stMyMsg *pMsg)
 {
 	if(pMsg->eventType == 0){
@@ -872,6 +901,14 @@ static void* loopGetMsg2(void* userData)
 	return (void*)0;
 }
 
+static void* loopGetMsg3(void* userData)
+{
+	while(1){
+		my_getfrom_mailbox_loop(MAIL_BOX_ID2, handleMsgTest, 1000);
+	}
+	return (void*)0;
+}
+
 static int handleMsgSelf(stMyMsg *pMsg)
 {
 	if(pMsg->eventType == 0){
@@ -887,6 +924,15 @@ static int handleMsgSelf(stMyMsg *pMsg)
 	return 0;	
 }
 
+static void* createAndDelete(void* userData)
+{
+	while(1){
+		my_create_mailbox(MAIL_BOX_ID2);
+		usleep(50000);
+		my_delete_mailbox(MAIL_BOX_ID2);
+	}
+	return NULL;
+}
 
 int main()
 {
@@ -968,7 +1014,7 @@ int main()
 	#endif
 
 	/* 测试case 4: 子进程发消息，子进程收消息 */
-	#if 1
+	#if 0
 	my_create_mailbox(MAIL_BOX_ID2);
 	
 	int threadID = -1;
@@ -978,5 +1024,17 @@ int main()
 		usleep(1000000);
 	}
 	#endif
+
+	/* 测试case 5: 一个线程发消息，一个线程收消息，
+	    一个线程不断创建和删除mailbox */
+	my_create_mailbox(MAIL_BOX_ID2);
+	
+	int threadID = -1;
+	pthread_create(&threadID, NULL, sendMsgTest5, NULL); 
+	pthread_create(&threadID, NULL, loopGetMsg3, NULL);
+	pthread_create(&threadID, NULL, createAndDelete, NULL);
+	while(1){
+		usleep(1000000);
+	}
 	return 0;
 }
