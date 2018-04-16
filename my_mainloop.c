@@ -61,8 +61,8 @@ typedef struct{
 #define LOOP_BUFF_MAX_IDX (64)
 #define LOOP_BUFF_ITEAM_MAX_LEN (256)
 typedef struct{
-	volatile int readIdx;
-	volatile int writeIdx;
+	int readIdx;
+	int writeIdx;
 	char buffer[LOOP_BUFF_MAX_IDX][LOOP_BUFF_ITEAM_MAX_LEN];
 }stLoopBuff;
 
@@ -128,6 +128,16 @@ static pthread_mutex_t s_mailbox_mutex;
 			return ret; \
 		}\
 	}while(0)
+
+#define SAFETY_MUTEX_LOCK(mutex) \
+do{ \
+	pthread_cleanup_push(pthread_mutex_unlock, &(mutex)); \
+	pthread_mutex_lock(&(mutex))
+		
+#define SAFETY_MUTEX_UNLOCK(mutex) \
+	pthread_mutex_unlock(&mutex); \
+	pthread_cleanup_pop(0); \
+}while(0)
 
 
 #if WRAPER_SYSAPI
@@ -291,15 +301,9 @@ static enBool checkLoopBuffFull()
 	return ((loopBuff.writeIdx+1)%LOOP_BUFF_MAX_IDX == loopBuff.readIdx) ? TRUE : FALSE;
 }
 
-static void calLoopBuffNextIdx(int *pIndex)
+static void calLoopBuffNextIdx(int *index)
 {
-	//*index = (*index + 1) % LOOP_BUFF_MAX_IDX;
-	int newIndex = __sync_add_and_fetch(pIndex, 1);
-    if (newIndex >= LOOP_BUFF_MAX_IDX){
-		/*bool __sync_bool_compare_and_swap (type *ptr, type oldval type newval, ...)
-		   if *ptr == oldval, use newval to update *ptr value */
-        __sync_bool_compare_and_swap(pIndex, newIndex, newIndex % LOOP_BUFF_MAX_IDX);
-    }
+	*index = (*index + 1) % LOOP_BUFF_MAX_IDX;
 	return;
 }
 
@@ -358,6 +362,7 @@ int my_mainloop_free(stMyMainLoop *pMainLoop)
 
 int my_mainloop_prepare(stMyMainLoop *pMainLoop)
 {
+	CHECK_POINTER_NULL(pMainLoop, -1);
 	CHECK_CONDITION_RET(pMainLoop->status != STATUS_INIT, -1);
 	printf("my_mainloop_prepare ....!\n");
 	memset(pMainLoop->pEvents, 0, sizeof(struct epoll_event) * MAX_EVENTS_NUM);
@@ -367,9 +372,9 @@ int my_mainloop_prepare(stMyMainLoop *pMainLoop)
 
 int my_mainloop_poll(stMyMainLoop *pMainLoop)
 {
+	CHECK_POINTER_NULL(pMainLoop, -1);
 	CHECK_CONDITION_RET(pMainLoop->status != STATUS_READY, -1);
 	CHECK_CONDITION_RET(pMainLoop->epoll_id == -1, -1);
-	printf("my_mainloop_poll ....!\n");
 	pMainLoop->fire_events = epoll_wait(pMainLoop->epoll_id, pMainLoop->pEvents, MAX_EVENTS_NUM, pMainLoop->time_out);
 	if(pMainLoop->fire_events < 0){
 		perror("epoll_wait: ");
@@ -384,6 +389,7 @@ int my_mainloop_poll(stMyMainLoop *pMainLoop)
 
 int my_mainloop_dispatch(stMyMainLoop *pMainLoop)
 {
+	CHECK_POINTER_NULL(pMainLoop, -1);
 	CHECK_CONDITION_RET(pMainLoop->status != STATUS_POLL, -1);
 	pollFunc pFunc = NULL;
 	int i = 0;
@@ -427,6 +433,7 @@ int my_mainloop_run(stMyMainLoop *pMainLoop)
 			break;
 		}
 	}
+	printf("pMainLoop->status=%d\n", pMainLoop->status);
 	return ret;
 }
 
@@ -592,6 +599,7 @@ void my_mailbox_init()
 
 int my_create_mailbox(enMailBoxId mailBoxId)
 {
+	int ret = 0;
 	if((mailBoxId >= MAX_MAIL_BOX_NUM) ||
 		(s_my_mailbox[mailBoxId].state != AVAIL_STATUS_FREE)){
 		printf("my_create_mailbox %d fail! (state=%d)\n", 
@@ -599,7 +607,7 @@ int my_create_mailbox(enMailBoxId mailBoxId)
 		return -1;
 	}
 
-	pthread_mutex_lock(&s_mailbox_mutex);
+	SAFETY_MUTEX_LOCK(s_mailbox_mutex);
 
 	s_my_mailbox[mailBoxId].pMainLoop = my_mainloop_new();
 	pipe(s_my_mailbox[mailBoxId].pipe_fd);
@@ -607,33 +615,32 @@ int my_create_mailbox(enMailBoxId mailBoxId)
 	printf("read fd=%d, write_fd=%d\n", s_my_mailbox[mailBoxId].pipe_fd[READ_PIPE],
 		s_my_mailbox[mailBoxId].pipe_fd[WRITE_PIPE]);
 
-	if(my_mainloop_add_event(s_my_mailbox[mailBoxId].pMainLoop, s_my_mailbox[mailBoxId].pipe_fd[READ_PIPE], EVENT_READ | EVENT_ERR) < 0){
-		my_mainloop_free(s_my_mailbox[mailBoxId].pMainLoop);
-		close(s_my_mailbox[mailBoxId].pipe_fd[READ_PIPE]);
-		s_my_mailbox[mailBoxId].pipe_fd[READ_PIPE] = -1;
-		close(s_my_mailbox[mailBoxId].pipe_fd[WRITE_PIPE]);
-		s_my_mailbox[mailBoxId].pipe_fd[WRITE_PIPE] = -1;
+	if(my_mainloop_add_event(s_my_mailbox[mailBoxId].pMainLoop,
+							s_my_mailbox[mailBoxId].pipe_fd[READ_PIPE],
+							EVENT_READ | EVENT_ERR) == 0){
+		if(my_mainloop_add_pollfunc(s_my_mailbox[mailBoxId].pipe_fd[READ_PIPE], readMsgInner) < 0){
+			printf("my_mainloop_add_pollfunc fail\n");
+			ret = -1;
+		}
+	}
+	else{
 		printf("my_mainloop_add_event fail\n");
-		pthread_mutex_unlock(&s_mailbox_mutex);
-		return -1;
+		ret = -1;
 	}
 	
-	if(my_mainloop_add_pollfunc(s_my_mailbox[mailBoxId].pipe_fd[READ_PIPE], readMsgInner) < 0){
-		my_mainloop_delete_event(s_my_mailbox[mailBoxId].pMainLoop, s_my_mailbox[mailBoxId].pipe_fd[READ_PIPE], EVENT_READ | EVENT_ERR);
+	if(ret < 0){
 		my_mainloop_free(s_my_mailbox[mailBoxId].pMainLoop);
 		close(s_my_mailbox[mailBoxId].pipe_fd[READ_PIPE]);
 		s_my_mailbox[mailBoxId].pipe_fd[READ_PIPE] = -1;
 		close(s_my_mailbox[mailBoxId].pipe_fd[WRITE_PIPE]);
 		s_my_mailbox[mailBoxId].pipe_fd[WRITE_PIPE] = -1;
-		printf("my_mainloop_add_pollfunc fail\n");
-		pthread_mutex_unlock(&s_mailbox_mutex);
-		return -1;
+		s_my_mailbox[mailBoxId].pMainLoop = NULL;
 	}
 
 	s_my_mailbox[mailBoxId].state = AVAIL_STATUS_USED;
-	pthread_mutex_unlock(&s_mailbox_mutex);
+	SAFETY_MUTEX_UNLOCK(s_mailbox_mutex);
 	printf("#######my_create_mailbox %d success!#######\n", mailBoxId);
-	return 0;
+	return ret;
 }
 
 void my_delete_mailbox(enMailBoxId mailBoxId)
@@ -645,33 +652,29 @@ void my_delete_mailbox(enMailBoxId mailBoxId)
 		return;
 	}
 
-	pthread_mutex_lock(&s_mailbox_mutex);
+	SAFETY_MUTEX_LOCK(s_mailbox_mutex);
 	if(s_my_mailbox[mailBoxId].pMainLoop){
 		s_my_mailbox[mailBoxId].pMainLoop->status = STATUS_QUIT;
+		s_my_mailbox[mailBoxId].state = AVAIL_STATUS_FREE;
+		stMyMsg msg = {-1};
+		write(s_my_mailbox[mailBoxId].pipe_fd[WRITE_PIPE], &msg, sizeof(stMyMsg));
+		usleep(100);
+		
+		my_mainloop_delete_pollfunc(s_my_mailbox[mailBoxId].pipe_fd[READ_PIPE]);
+		my_mainloop_delete_event(s_my_mailbox[mailBoxId].pMainLoop, s_my_mailbox[mailBoxId].pipe_fd[READ_PIPE], EVENT_READ);
+		if(close(s_my_mailbox[mailBoxId].pipe_fd[READ_PIPE]) < 0){
+			printf("my_delete_mailbox-> close read fd fail!!!!\n");
+		}
+		s_my_mailbox[mailBoxId].pipe_fd[READ_PIPE] = -1;
+		if(close(s_my_mailbox[mailBoxId].pipe_fd[WRITE_PIPE]) < 0){
+			printf("my_delete_mailbox-> close write fd fail!!!!\n");
+		}
+		s_my_mailbox[mailBoxId].pipe_fd[WRITE_PIPE] = -1;
+		my_mainloop_free(s_my_mailbox[mailBoxId].pMainLoop);
+		s_my_mailbox[mailBoxId].pMainLoop = NULL;
 	}
-	else{
-		pthread_mutex_unlock(&s_mailbox_mutex);
-		return;
-	}
-	s_my_mailbox[mailBoxId].state = AVAIL_STATUS_FREE;
-	stMyMsg msg = {-1};
-	write(s_my_mailbox[mailBoxId].pipe_fd[WRITE_PIPE], &msg, sizeof(stMyMsg));
-	
-	my_mainloop_delete_pollfunc(s_my_mailbox[mailBoxId].pipe_fd[READ_PIPE]);
-	my_mainloop_delete_event(s_my_mailbox[mailBoxId].pMainLoop, s_my_mailbox[mailBoxId].pipe_fd[READ_PIPE], EVENT_READ);
-	if(close(s_my_mailbox[mailBoxId].pipe_fd[READ_PIPE]) < 0){
-		printf("my_delete_mailbox-> close read fd fail!!!!\n");
-	}
-	s_my_mailbox[mailBoxId].pipe_fd[READ_PIPE] = -1;
-	if(close(s_my_mailbox[mailBoxId].pipe_fd[WRITE_PIPE]) < 0){
-		printf("my_delete_mailbox-> close write fd fail!!!!\n");
-	}
-	s_my_mailbox[mailBoxId].pipe_fd[WRITE_PIPE] = -1;
-	my_mainloop_free(s_my_mailbox[mailBoxId].pMainLoop);
-	s_my_mailbox[mailBoxId].pMainLoop = NULL;
-
+	SAFETY_MUTEX_UNLOCK(s_mailbox_mutex);
 	printf("--------my_delete_mailbox %d done!!\n", mailBoxId);
-	pthread_mutex_unlock(&s_mailbox_mutex);
 	return;
 }
 
@@ -686,9 +689,9 @@ void my_sendto_mailbox(enMailBoxId mailBoxId, stMyMsg *pMsg)
 		return;
 	}
 	
-	//pthread_mutex_lock(&s_mailbox_mutex);
+	SAFETY_MUTEX_LOCK(s_mailbox_mutex);
 	write(s_my_mailbox[mailBoxId].pipe_fd[WRITE_PIPE], pMsg, sizeof(stMyMsg));
-	//pthread_mutex_unlock(&s_mailbox_mutex);
+	SAFETY_MUTEX_UNLOCK(s_mailbox_mutex);
 	return;
 }
 
@@ -703,10 +706,10 @@ void my_getfrom_mailbox(enMailBoxId mailBoxId, handleMsg pHandleMsgFunc, int tim
 		return;
 	}
 
-	pthread_mutex_lock(&s_mailbox_mutex);
+	SAFETY_MUTEX_LOCK(s_mailbox_mutex);
 	s_my_mailbox[mailBoxId].pMainLoop->pUserData = (void*)pHandleMsgFunc;
 	s_my_mailbox[mailBoxId].pMainLoop->time_out = timeOut;
-	pthread_mutex_unlock(&s_mailbox_mutex);
+	SAFETY_MUTEX_UNLOCK(s_mailbox_mutex);
 
 	if(s_my_mailbox[mailBoxId].pMainLoop->status != STATUS_QUIT){
 		printf("pMainLoop->status=%d\n", s_my_mailbox[mailBoxId].pMainLoop->status);
@@ -728,7 +731,8 @@ void my_getfrom_mailbox(enMailBoxId mailBoxId, handleMsg pHandleMsgFunc, int tim
 			return;
 		}
 	}
-	return;
+	return;
+
 }
 
 /* timeOut: -1: wait forever else positive value (ms) */
@@ -741,12 +745,13 @@ void my_getfrom_mailbox_loop(enMailBoxId mailBoxId, handleMsg pHandleMsgFunc, in
 		return;
 	}
 
-	pthread_mutex_lock(&s_mailbox_mutex);
+	SAFETY_MUTEX_LOCK(s_mailbox_mutex);
 	s_my_mailbox[mailBoxId].pMainLoop->pUserData = (void*)pHandleMsgFunc;
 	s_my_mailbox[mailBoxId].pMainLoop->time_out = timeOut;
-	pthread_mutex_unlock(&s_mailbox_mutex);
+	SAFETY_MUTEX_UNLOCK(s_mailbox_mutex);
 	my_mainloop_run(s_my_mailbox[mailBoxId].pMainLoop);
-	return;
+	return;
+
 }
 
 static void* sendMsgTest1(void* userData)
@@ -761,7 +766,7 @@ static void* sendMsgTest1(void* userData)
 		msg.eventType = 0;
 		sprintf(msg.eventData, "%s", "[MAILBOX1]hello, test 2 message send!!!\n");
 		my_sendto_mailbox(MAIL_BOX_ID1, &msg);
-		usleep(10000);
+		//usleep(1000);
 
 		msg.eventType = 1;
 		int a = 100, b = 200;
@@ -769,12 +774,12 @@ static void* sendMsgTest1(void* userData)
 					 	sizeof(int), &a,
 					 	sizeof(int), &b, -1);
 		my_sendto_mailbox(MAIL_BOX_ID1, &msg);
-		usleep(100000);
-		cnt++;
-		if(cnt > 10){
-			my_delete_mailbox(MAIL_BOX_ID1);
-			cnt = 0;
-		}
+		usleep(1000);
+		//cnt++;
+		//if(cnt > 10){
+		//	my_delete_mailbox(MAIL_BOX_ID1);
+		//	cnt = 0;
+		//}
 	}
 	return (void*)0;
 }
@@ -791,7 +796,7 @@ static void* sendMsgTest2(void* userData)
 		msg.eventType = 0;
 		sprintf(msg.eventData, "%s", "[MAILBOX2]hello, test 2 message send!!!\n");
 		my_sendto_mailbox(MAIL_BOX_ID2, &msg);
-		usleep(100000);
+		usleep(10000);
 
 		msg.eventType = 1;
 		int a = 1000, b = 2000;
@@ -863,7 +868,7 @@ static void* loopGetMsg1(void* userData)
 
 static void* loopGetMsg2(void* userData)
 {
-	my_getfrom_mailbox_loop(MAIL_BOX_ID2, handleMsgTest, -1);
+	my_getfrom_mailbox_loop(MAIL_BOX_ID2, handleMsgTest, 1000);
 	return (void*)0;
 }
 
@@ -876,10 +881,12 @@ static int handleMsgSelf(stMyMsg *pMsg)
 		msg.eventType = 0;
 		sprintf(msg.eventData, "%s", "[MAILBOX1]hello, test 1 message send by myself!!!\n");
 		my_sendto_mailbox(MAIL_BOX_ID1, &msg);
+		usleep(10000);
 		printf("send message to MAIL_BOX_ID1 by myself.\n");
 	}
 	return 0;	
 }
+
 
 int main()
 {
@@ -907,6 +914,8 @@ int main()
 	/* Test mailBox */
 	my_mailbox_init();
 
+	/* 测试case 1: 普通测试 */
+	#if 0
 	my_create_mailbox(MAIL_BOX_ID2);
 	my_create_mailbox(MAIL_BOX_ID3);
 	
@@ -919,15 +928,55 @@ int main()
 	pthread_create(&threadID, NULL, loopGetMsg2, NULL);
 
 	my_getfrom_mailbox_loop(MAIL_BOX_ID3, handleMsgTest, 500);
+	#endif
 
-	#if 0
-	/* 测试自己给自己发消息 */
+	/* 测试case 2: 测试自己给自己发消息 */
 	my_create_mailbox(MAIL_BOX_ID1);
+
+	/* 开启另一个线程也给mailbox1发消息 */
+	/*
+	如果存在一个线程自己给自己发消息，其他
+	线程也在频繁的发消息，则会发生管道满了
+	往管道写数据就阻塞了。
+	*/
+	#if 0
+	int threadID = -1;
+	pthread_create(&threadID, NULL, sendMsgTest1, NULL);
 	stMyMsg msg = {0};
 	msg.eventType = 0;
 	sprintf(msg.eventData, "%s", "[MAILBOX1]hello, test 1 message send!!!\n");
 	my_sendto_mailbox(MAIL_BOX_ID1, &msg);
 	my_getfrom_mailbox_loop(MAIL_BOX_ID1, handleMsgSelf, 500);
+	#endif
+	/* 测试case 3: 一次性发送多条，一次性读取多条*/
+	#if 0
+	stMyMsg msg = {0};
+	msg.eventType = 0;
+	sprintf(msg.eventData, "%s", "[MAILBOX1]hello, test 1 message send!!!\n");
+	int cnt = 0;
+	while(1){
+		/* 经测试pipe 管道可以连续写入的数据为240 * sizeof(stMyMsg) = 240 * 260 bytes */
+		cnt++;
+		my_sendto_mailbox(MAIL_BOX_ID1, &msg);
+		printf("cnt = %d, size = %d\n", cnt, sizeof(stMyMsg));
+		if(cnt >= 10){
+			break;
+		}
+	}
+	
+	my_getfrom_mailbox_loop(MAIL_BOX_ID1, handleMsgTest, -1);
+	#endif
+
+	/* 测试case 4: 子进程发消息，子进程收消息 */
+	#if 1
+	my_create_mailbox(MAIL_BOX_ID2);
+	
+	int threadID = -1;
+	pthread_create(&threadID, NULL, sendMsgTest2, NULL); 
+	pthread_create(&threadID, NULL, loopGetMsg2, NULL);
+	while(1){
+		usleep(1000000);
+	}
 	#endif
 	return 0;
 }
