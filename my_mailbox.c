@@ -142,13 +142,12 @@ enBool Get_MessageBuffer(stMyMsg **ppMsgBuff)
 	stMsgNode *pUsed = s_msg_buffer_list.pFreeList;
 	s_msg_buffer_list.pFreeList = s_msg_buffer_list.pFreeList->pNext;
 	s_msg_buffer_list.freeCnt--;
+	pUsed->pAddr = NULL;
 	if(!s_msg_buffer_list.pUsedList){
 		pUsed->pNext = NULL;
-		pUsed->pAddr = NULL;
 		s_msg_buffer_list.pUsedList = pUsed;
 	}
 	else{
-		pUsed->pAddr = NULL;
 		pUsed->pNext = s_msg_buffer_list.pUsedList->pNext;
 		s_msg_buffer_list.pUsedList->pNext = pUsed;
 	}
@@ -163,8 +162,14 @@ enBool Free_MessageBuffer(stMyMsg *pMsgBuff)
 	stMsgNode *pFree = s_msg_buffer_list.pUsedList;
 	s_msg_buffer_list.pUsedList = s_msg_buffer_list.pUsedList->pNext;
 	pFree->pAddr = (void*)pMsgBuff;
-	pFree->pNext = s_msg_buffer_list.pFreeList->pNext;
-	s_msg_buffer_list.pFreeList->pNext = pFree;
+	pFree->pNext = NULL;
+	if(!s_msg_buffer_list.pFreeList){
+		s_msg_buffer_list.pFreeList = pFree;
+	}
+	else{
+		pFree->pNext = s_msg_buffer_list.pFreeList->pNext;
+		s_msg_buffer_list.pFreeList->pNext = pFree;
+	}
 	s_msg_buffer_list.freeCnt++;
 	SAFETY_MUTEX_UNLOCK(s_msg_buffer_list.mutex);
 	return TRUE;
@@ -185,7 +190,7 @@ stLoopQueue* Create_LoopQueue(int queueMaxCnt)
 		pLoopQueue->readIdx = 0;
 		pLoopQueue->writeIdx = 0;
 		pLoopQueue->ppQueue = (void**)malloc(sizeof(void*) * (queueMaxCnt + 1));
-		pLoopQueue->maxCnt = queueMaxCnt + 1;
+		pLoopQueue->maxCnt = queueMaxCnt + 1; /* 用循环队列机制需多出一个空间 */
 	}
 	return pLoopQueue;
 }
@@ -619,6 +624,29 @@ static void* loopGetMsg4(void* userData)
 	return (void*)0;
 }
 
+static void* sendReceiveSelf(void* userData)
+{
+	stMyMsg *pMsg = NULL;
+	Get_MessageBuffer(&pMsg);
+	pMsg->eventType = 0;
+	sprintf(pMsg->eventData, "%s", "[MAILBOX1]message send by myself!!!\n");
+	SendTo_MailBox(MAIL_BOX_ID1, pMsg, -1);
+	while(1){
+		if(ReceiveFrom_MailBox(MAIL_BOX_ID1, &pMsg, -1)){
+			handleMsgTest(pMsg);
+			Free_MessageBuffer(pMsg);
+
+			/* 又自己给自己发消息 */
+			Get_MessageBuffer(&pMsg);
+			pMsg->eventType = 0;
+			sprintf(pMsg->eventData, "%s", "[MAILBOX1]message send by myself!!!\n");
+			SendTo_MailBox(MAIL_BOX_ID1, pMsg, -1);
+		}
+	}
+	return (void*)0;
+}
+
+
 int main()
 {
 	int pID[2] = {-1, -1};
@@ -706,13 +734,57 @@ int main()
 	}
 	#endif
 	/* 测试case 3: 延迟接收 */
-	#if 1
+	#if 0
 	int threadID = -1;
 	pthread_create(&threadID, NULL, sendMsgTest1, NULL);
 	pthread_create(&threadID, NULL, sendMsgTest2, NULL);
 	usleep(1000000);
 	pthread_create(&threadID, NULL, loopGetMsg1, NULL);
 	pthread_create(&threadID, NULL, loopGetMsg2, NULL);
+	while(1){
+		usleep(500000);
+	}
+	#endif
+
+	/* 测试case 4: 测试timeout */
+	#if 0
+	int cnt = 0;
+	int threadID = -1;
+	stMyMsg *pMsg = NULL;
+	while(1){
+		Get_MessageBuffer(&pMsg);
+		pMsg->eventType = 0;
+		sprintf(pMsg->eventData, "%s", "[MAILBOX1]hello, test 1 message send!!!\n");
+		SendTo_MailBox(MAIL_BOX_ID1, pMsg, 100);
+
+		Get_MessageBuffer(&pMsg);
+		pMsg->eventType = 0;
+		sprintf(pMsg->eventData, "%s", "[MAILBOX1]hello, test 2 message send!!!\n");
+		SendTo_MailBox(MAIL_BOX_ID1, pMsg, 200);
+		usleep(1000);
+
+		Get_MessageBuffer(&pMsg);
+		pMsg->eventType = 1;
+		int a = 100, b = 200;
+		my_msg_packer(pMsg->eventData,
+					 	sizeof(int), &a,
+					 	sizeof(int), &b, -1);
+		SendTo_MailBox(MAIL_BOX_ID1, pMsg, 300);
+		usleep(10000);
+		if(cnt++ > 50){
+			break;
+		}
+	}
+	pthread_create(&threadID, NULL, loopGetMsg1, NULL);
+	while(1){
+		usleep(500000);
+	}
+	#endif
+
+	/* 测试case 5: 单线程收发 */
+	#if 1
+	int threadID = -1;
+	pthread_create(&threadID, NULL, sendReceiveSelf, NULL);
 	while(1){
 		usleep(500000);
 	}
