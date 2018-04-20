@@ -355,7 +355,7 @@ enBool SendTo_MailBox(int mailBoxID, void *pMsg, int timeOutMs)
 */
 enBool ReceiveFrom_MailBox(int mailBoxID, void **ppMsg, int timeOutMs)
 {
-	//CHECK_POINTER_NULL(pMsg, FALSE);
+	CHECK_POINTER_NULL(ppMsg, FALSE);
 	if(mailBoxID < 0 || mailBoxID >= MAILBOX_MAX_CNT || 
 		s_mail_box[mailBoxID].state != AVAIL_STATUS_USED ||
 		timeOutMs < -1){
@@ -705,40 +705,16 @@ int main()
 		usleep(500000);
 	}
 	#endif
-	/* 测试case 3: 一次性发送多条，一次性读取多条*/
+	/* 测试case 3: 延迟接收 */
 	#if 1
 	int threadID = -1;
 	pthread_create(&threadID, NULL, sendMsgTest1, NULL);
+	pthread_create(&threadID, NULL, sendMsgTest2, NULL);
 	usleep(1000000);
 	pthread_create(&threadID, NULL, loopGetMsg1, NULL);
-	while(1){
-		usleep(500000);
-	}
-	#endif
-
-	/* 测试case 4: 子进程发消息，子进程收消息 */
-	#if 0
-	my_create_mailbox(MAIL_BOX_ID2);
-	
-	int threadID = -1;
-	pthread_create(&threadID, NULL, sendMsgTest2, NULL); 
 	pthread_create(&threadID, NULL, loopGetMsg2, NULL);
 	while(1){
-		usleep(1000000);
-	}
-	#endif
-
-	#if 0
-	/* 测试case 5: 一个线程发消息，一个线程收消息，
-	    一个线程不断创建和删除mailbox */
-	my_create_mailbox(MAIL_BOX_ID2);
-	
-	int threadID = -1;
-	pthread_create(&threadID, NULL, sendMsgTest5, NULL); 
-	pthread_create(&threadID, NULL, loopGetMsg3, NULL);
-	pthread_create(&threadID, NULL, createAndDelete, NULL);
-	while(1){
-		usleep(1000000);
+		usleep(500000);
 	}
 	#endif
 
